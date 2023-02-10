@@ -1,0 +1,180 @@
+---
+title: "DABN_case2_data"
+output: html_document
+date: '2023-02-06'
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# you may need to dowload the following package:
+#install.packages("tidyjson")
+library(tidyverse)
+library(tidyjson)
+
+# Define a function to load data from JSON files in the subdirectory
+load_data <- function(pattern) {
+  # Load data from all files in the directory that match the given pattern
+  lapply(list.files(recursive = T) %>% .[grepl(pattern, .)], function(file_name) {
+    print(file_name)
+    # Read the file and convert it to a data frame from JSON format and select cols
+    readLines(file_name) %>% as.tbl_json %>% spread_all %>% 
+      as.data.frame %>% .[,-(1:4)]
+  }) %>% bind_rows(.) %>% 
+    rename_with(~sub("_source.", "", .x)) %>%
+    arrange(search_id) %>% #sort by search_id
+    distinct(search_id, .keep_all = T) # drop duplicated searches
+}
+
+# Load orders and clicks data from JSON files
+orders <- load_data("orders.split")
+clicks <- load_data("meta_clicks")
+
+colnames(orders) <- paste("order", colnames(orders), sep = "_")
+colnames(clicks) <- paste("click", colnames(clicks), sep = "_")
+
+# Merge the clicks and orders data frames based on the search_id column
+click_order_merge <- left_join(clicks, orders, by = c("click_search_id" = "order_search_id"), suffixes = c("_clicks", "_orders")) %>% 
+  arrange(click_search_id)  # Order the merged data frame by the search_id column
+
+# First few rows of merged data set
+print(click_order_merge %>% head(n = 20))
+
+# Checking colnames and comparing the content of merged tables
+sapply(click_order_merge$..JSON.y[[1]] , names)
+clicks %>% colnames()
+
+#if yuou want to save it 
+click_order_merge %>% write_csv2("click_order_merged.csv")
+
+#Read it
+click_order_merge <- read_csv2("click_order_merged.csv" )
+```
+
+
+
+
+```{r}
+click_order_merge$order_if_order <- ifelse(click_order_merge$order_order_id %>% is.na,0, 1)
+
+# Excluding useless columsn
+click_order_merge <- click_order_merge %>% 
+  select(-c(
+    # click_columns
+    click_gate_id, click_meta_ref,click_searchrule_id, click_searchrule_version_id,
+    click_pricerule_flight_version_id, click_pricerule_hotel_version_id, click_pricerule_meta_version_id, click_pricerule_ancillary_version_id, click_presentationrule_version_id, 
+    # order_columns
+    order_midoffice_id, #order_midoffice_contact_id, order_midoffice_quotation_id, 
+    order_paid_unique_id, order_searchrule_action_id, order_logreader_type, order_searchrule_action_id, order_search_data.searchrule_id, order_search_data.gate_id, order_search_data.meta_rule_version_id, order_search_data.search_rule_version_id, 
+    order_search_data.flight_rule_version_id, order_search_data.hotel_rule_version_id, order_search_data.meta_rule_version_id, order_search_data.ancillary_rule_version_id, order_search_data.presentation_rule_version_id, order_search_data.text_rule_version_id,
+    contains("JSON"), # we no longer need this
+    matches("leg_._(origin|destina)") # excluding origin destinations of following legs, as maybe date will be helpful for summing no. legs
+))
+click_order_merge$order_order_type %>% table # very small number of addons hah
+```
+
+# Data transformation for number of legs for ordered itinerary
+I found a strange thing for legs number that there are some with only one leg
+
+```{r}
+click_order_merge$order_search_data.search_parameters.leg_number  <- click_order_merge %>% select(matches("leg_")) %>% 
+  mutate(order_search_data.search_parameters.leg_number = ifelse(
+    rowSums(ifelse(is.na(.), 0, 1)) != 0,
+    rowSums(ifelse(is.na(.), 0, 1))-1, NA)) %>% .$order_search_data.search_parameters.leg_number 
+
+# I found a strange thing for legs number that there are some with only one leg
+click_order_merge[
+  click_order_merge$order_search_data.search_parameters.leg_number <= 0 & !is.na(click_order_merge$order_search_data.search_parameters.leg_number), ] 
+
+click_order_merge$order_search_data.search_parameters.leg_number %>% table
+# print(click_order_merge$order_if_order %>% table)
+```
+
+# Line chart with rate of clicks that resulted in an order
+
+```{r }
+click_order_merge %>% 
+  mutate(click_created_at_date = as.Date(as.POSIXct(click_created_at))) %>% 
+  group_by(click_created_at_date, order_if_order) %>% 
+  summarise(click_count = n()) %>% 
+  pivot_wider(id_cols = "click_created_at_date", names_from = order_if_order, values_from = "click_count", names_prefix = "order_if_") %>%
+  mutate(order_if_total = order_if_0 + order_if_1, order_if_perc = order_if_1 / order_if_total) %>% 
+  ggplot(.) +
+      geom_line(mapping = aes(x = click_created_at_date, y = order_if_perc)) +
+  ylim(0,.1) +
+  labs(x = "Click Created Date", y = "Click Count") +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  ggtitle("Clicks by Date and Order Status")
+```
+
+# Chart showing count of clicks with order and without
+```{r datetime}
+click_order_merge %>% 
+  mutate(click_created_at_date = as.Date(as.POSIXct(click_created_at))) %>% 
+  group_by(click_created_at_date, order_if_order) %>% 
+  summarise(click_count = n()) %>% 
+  # pivot_wider(id_cols = "click_created_at_date", names_from = order_if_order, values_from = "click_count", names_prefix = "order_if_") %>%
+  # mutate(order_if_total = order_if_0 + order_if_1, order_if_perc = order_if_1 / order_if_total) %>% 
+  ggplot(.) +
+      geom_line(mapping = aes(x = click_created_at_date, y = click_count, group = order_if_order)) +
+  # ylim(0,1) +
+  labs(x = "Click Created Date", y = "Click Count") +
+  theme_classic() +
+  theme(legend.position = "bottom") +
+  ggtitle("Clicks by Date and Order Status")
+```
+### Price columns
+```{r}
+click_order_merge %>% colnames %>% grep("price", ., value = T)
+
+click_order_merge %>% 
+  filter(order_if_order == 1) %>% 
+  select(contains("price")) %>% View
+```
+#Cancellation rates by route - here are some flights that are more often to be cancelled
+```{r }
+click_order_merge %>% filter(order_if_order == 1) %>% select(contains("cancel"), contains("itinerary_string")) %>% 
+  # filter(order_cancelled == T) %>% 
+  group_by(order_search_data.itinerary_string, order_cancelled) %>% 
+  summarise(count = n()) %>% arrange(desc(count)) %>% 
+  pivot_wider(id_cols = "order_search_data.itinerary_string", names_from = "order_cancelled", values_from = "count") %>% replace_na(list(`TRUE` = 0)) %>% 
+  mutate(count = `TRUE` + `FALSE`, cancellation_rate = `TRUE` / count) %>% 
+  arrange(desc(cancellation_rate)) %>% 
+  filter(`FALSE` > 0) %>% #ONLY orders
+  filter(count > 50) # only major routes
+  View
+orders$order_cancelled_description %>% table # useless all the cancellations are called Confirm failure
+```
+
+#Cancellation rates by mobile device - higher canccelation rates for 
+```{r }
+orders %>% 
+  select(contains("cancel"), contains("mobile")) %>% 
+  # filter(order_cancelled == T) %>% 
+  group_by(order_search_data.mobile, order_cancelled) %>% 
+  summarise(count = n()) %>% arrange(desc(count)) %>% 
+  pivot_wider(id_cols = "order_search_data.mobile", names_from = "order_cancelled", values_from = "count") %>% replace_na(list(`TRUE` = 0)) %>% 
+  mutate(count = `TRUE` + `FALSE`, cancellation_rate = `TRUE` / count) %>% 
+  arrange(desc(cancellation_rate)) %>% 
+  filter(`FALSE` > 0) %>% #ONLY orders
+  View
+
+```
+# so the clicks were directing to their site so the customer already made certain choice from offers displyed on skyscanner. After all the percentage of orders after this click is pretty stable and doesn't sepend on the positioning on the webpage
+```{r}
+click_order_merge %>% 
+  select(order_if_order, click_result_set_position_sales_price) %>% 
+  mutate(order_if_order = as.factor(order_if_order)) %>% 
+  ggplot( aes(x=click_result_set_position_sales_price, fill=order_if_order)) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'identity', binwidth = 1) +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    # theme_ipsum() +
+    labs(fill="") + 
+  xlim(0, 20) +
+  ylim(0, 15000)
+  scale_y_continuous(trans='log')
+
+
+```
