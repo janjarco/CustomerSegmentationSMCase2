@@ -17,6 +17,7 @@ library(tidyjson)
 load_data <- function(pattern) {
   # Load data from all files in the directory that match the given pattern
   lapply(list.files(recursive = T) %>% .[grepl(pattern, .)], function(file_name) {
+    # browser()
     print(file_name)
     # Read the file and convert it to a data frame from JSON format and select cols
     readLines(file_name) %>% as.tbl_json %>% spread_all %>% 
@@ -35,7 +36,10 @@ colnames(orders) <- paste("order", colnames(orders), sep = "_")
 colnames(clicks) <- paste("click", colnames(clicks), sep = "_")
 
 # Merge the clicks and orders data frames based on the search_id column
-click_order_merge <- left_join(clicks, orders, by = c("click_search_id" = "order_search_id"), suffixes = c("_clicks", "_orders")) %>% 
+click_order_merge_raw <- left_join(clicks, orders, by = c("click_search_id" = "order_search_id"), suffixes = c("_clicks", "_orders")) %>% 
+  arrange(click_search_id)  # Order the merged data frame by the search_id column
+
+click_order_fulljoin_raw <- full_join(clicks, orders, by = c("click_search_id" = "order_search_id"), suffixes = c("_clicks", "_orders")) %>% 
   arrange(click_search_id)  # Order the merged data frame by the search_id column
 
 # First few rows of merged data set
@@ -46,20 +50,19 @@ sapply(click_order_merge$..JSON.y[[1]] , names)
 clicks %>% colnames()
 
 #if yuou want to save it 
-click_order_merge %>% write_csv2("click_order_merged.csv")
+click_order_merge_raw %>% write_csv2("click_order_merged.csv")
 
 #Read it
-click_order_merge <- read_csv2("click_order_merged.csv" )
+click_order_merge_raw <- read_csv2("click_order_merged.csv", col_types = cols(.default = "?", order_user_ipaddress = col_character()))
 ```
 
 
 
 
 ```{r}
-click_order_merge$order_if_order <- ifelse(click_order_merge$order_order_id %>% is.na,0, 1)
 
-# Excluding useless columsn
-click_order_merge <- click_order_merge %>% 
+# Excluding useless columns
+click_order_merge <- click_order_merge_raw %>% 
   select(-c(
     # click_columns
     click_gate_id, click_meta_ref,click_searchrule_id, click_searchrule_version_id,
@@ -71,6 +74,7 @@ click_order_merge <- click_order_merge %>%
     contains("JSON"), # we no longer need this
     matches("leg_._(origin|destina)") # excluding origin destinations of following legs, as maybe date will be helpful for summing no. legs
 ))
+click_order_merge$order_if_order <- ifelse(click_order_merge$order_order_id %>% is.na,0, 1)
 click_order_merge$order_order_type %>% table # very small number of addons hah
 ```
 
@@ -143,7 +147,7 @@ click_order_merge %>% filter(order_if_order == 1) %>% select(contains("cancel"),
   mutate(count = `TRUE` + `FALSE`, cancellation_rate = `TRUE` / count) %>% 
   arrange(desc(cancellation_rate)) %>% 
   filter(`FALSE` > 0) %>% #ONLY orders
-  filter(count > 50) # only major routes
+  filter(count > 50) %>% # only major routes
   View
 orders$order_cancelled_description %>% table # useless all the cancellations are called Confirm failure
 ```
@@ -175,6 +179,190 @@ click_order_merge %>%
   xlim(0, 20) +
   ylim(0, 15000)
   scale_y_continuous(trans='log')
+
+
+```
+# When they cancel?
+```{r}
+
+orders %>% select(timestamp_date, paid_at_date, paid, cancelled_at, cancelled) %>% 
+  filter(cancelled == T) %>%
+  mutate(
+    cancelled_at = as.POSIXct(strptime(cancelled_at, format = "%Y-%m-%dT%H:%M:%S")), 
+    timestamp_date = as.POSIXct(strptime(timestamp_date, format = "%Y-%m-%dT%H:%M:%S")),
+    paid_at_date = as.POSIXct(strptime(paid_at_date, format = "%Y-%m-%dT%H:%M:%S")), 
+    timestamp_cancelled_timeperiod = cancelled_at - timestamp_date
+    ) %>% .$timestamp_cancelled_timeperiod %>% table
+
+click_order_merge %>% select(order_if_order, order_search_data.gate_name) %>% table %>% t
+  
+```
+```{r}
+
+click_order_merge %>% 
+  select(click_itinerary_string, order_if_order) %>% 
+  table %>% as.data.frame() %>% 
+  pivot_wider(id_cols = "click_itinerary_string", names_from = "order_if_order", names_prefix = "if_order_", values_from = "Freq") %>% mutate(total = if_order_0 + if_order_1, conversion_rate = if_order_1 / total) %>% arrange(desc(total)) %>% 
+  filter(total > 100) %>% 
+  ggplot(., aes(x = total, y = conversion_rate)) +
+  geom_point() +
+  ggtitle("Conversion rates for certain routes") + 
+  xlab("Total number of clicks") +
+  scale_x_continuous(trans = "log")
+```
+MObile vs desktop
+```{r}
+
+click_order_merge %>% 
+  select(click_mobile, order_if_order) %>% 
+  table %>% as.data.frame() %>% mutate(click_mobile = as.factor(if_else(click_mobile == TRUE, "mobile", "desktop"))) %>% 
+  pivot_wider(id_cols = "click_mobile", names_from = "order_if_order", names_prefix = "if_order_", values_from = "Freq") %>% mutate(total = if_order_0 + if_order_1, conversion_rate = if_order_1 / total) %>% arrange(desc(total)) %>% 
+  filter(total > 100) %>% 
+  ggplot(., aes(x = total, y = conversion_rate)) +
+  geom_point() #+
+  scale_x_continuous(trans='log')
+  
+```
+Cheapest fastest, best
+```{r}
+click_order_merge %>% 
+  mutate(click_result_set_price_chosen = as.factor(dplyr::case_when(
+  click_itinerary_sales_price == click_result_set_cheapest_price ~ "cheapest",
+  click_itinerary_sales_price == click_result_set_best_price ~ "best",
+  click_itinerary_sales_price == click_result_set_fastest_price ~ "fastest", 
+  TRUE ~ NA_character_))) %>% 
+  select(click_result_set_price_chosen, order_if_order) %>% 
+  table %>% as.data.frame() %>% 
+  pivot_wider(id_cols = "click_result_set_price_chosen", names_from = "order_if_order", names_prefix = "if_order_", values_from = "Freq") %>% mutate(total = if_order_0 + if_order_1, conversion_rate = if_order_1 / total) %>% arrange(desc(total))
+  
+```
+
+click_itinerary_direct_flight
+```{r}
+
+click_order_merge %>% 
+  select(click_itinerary_direct_flight, order_if_order) %>% 
+  table %>% as.data.frame() %>% #mutate(click_mobile = as.factor(if_else(click_mobile == TRUE, "mobile", "desktop"))) %>% 
+  pivot_wider(id_cols = "click_itinerary_direct_flight", names_from = "order_if_order", names_prefix = "if_order_", values_from = "Freq") %>% mutate(total = if_order_0 + if_order_1, conversion_rate = if_order_1 / total) %>% arrange(desc(total)) %>% 
+  # filter(total > 100) %>% 
+  ggplot(., aes(x = total, y = conversion_rate)) +
+  geom_point() #+
+  scale_x_continuous(trans='log')
+```
+```{r} 
+click_order_merge %>% 
+  select(order_if_order, click_itinerary_travel_time) %>% 
+  mutate(order_if_order = as.factor(order_if_order)) %>% 
+  ggplot( aes(x=click_itinerary_travel_time, fill=order_if_order)) +
+    geom_histogram( color="#e9ecef", alpha=0.6, position = 'fill', binwidth = 100) +
+    scale_fill_manual(values=c("#69b3a2", "#404080")) +
+    xlim(0, 4000)
+    # theme_ipsum() +
+    labs(fill="") 
+```
+
+```{r}
+library(jsonlite)
+library(httr)
+
+get_location <- function(ip_address) {
+  # browser()
+  url <- paste0('https://ipapi.co/', ip_address, '/json/')
+  response <- GET(url)
+  response_json <- content(response, "text")
+  response_list <- fromJSON(response_json)
+  
+  location_data <- list(
+    "ip" = ip_address,
+    "city" = response_list$city,
+    "region" = response_list$region,
+    "country" = response_list$country_name
+  )
+  # print(paste(ip_address, " extracted"))
+  return(location_data)
+}
+
+get_location(click_order_merge$order_user_ipaddress[1])
+
+click_order_merge_filtered <- click_order_merge %>% filter(order_if_order == T) 
+
+suppressWarnings()
+temp <- suppressWarnings({sapply(c(1:nrow(click_order_merge_filtered)), function(i){
+  print(paste(i / nrow(click_order_merge_filtered), "made"))
+  return(get_location(click_order_merge_filtered$order_user_ipaddress[i]) )
+}, simplify = F, USE.NAMES = F) })
+
+ip_adresses_location <- sapply(temp , unlist) %>% do.call("rbind", .) %>% as.data.frame() 
+write.csv2(ip_adresses_location, "ip_adresses_location.csv", row.names = F)
+```
+
+Adding airports distances
+
+```{r}
+
+click_order_merge_filtered <- click_order_merge %>% filter(order_if_order == T) 
+# airports = read.csv("airports.csv") %>% select_at(-1)
+airports = read.csv( "https://raw.githubusercontent.com/ip2location/ip2location-iata-icao/master/iata-icao.csv") %>% 
+  select(iata, lat = latitude, lon = longitude) 
+
+#adding some missing airports
+airports <- airports %>% rbind(., c( "LON", airports[airports$iata == "LHR", 2:3] %>% unlist())) %>% 
+  rbind(., c( "PRN", 42.6629, 21.1655)) %>% 
+  rbind(., c("UBN", 47.6514, 106.8216))%>% 
+  mutate(lat = as.numeric(lat), lon = as.numeric(lon))
+
+airports %>% str
+
+
+# install.packages("geosphere")
+library(geosphere)
+
+str <- "CPH-WAW"
+
+distance_airports <- function(str){
+  # browser()
+  if (is.na(str)){return(NA)} else{
+  origin <- str_split(str, pattern = "-")[[1]][1]
+  destination <- str_split(str, pattern = "-")[[1]][2]
+  
+  origin_lon <-  airports[which(airports['iata'] == origin), 'lon']
+  origin_lat <-  airports[which(airports['iata'] == origin), 'lat']
+  
+  destination_lon <-  airports[which(airports['iata'] == destination), 'lon']
+  destination_lat <-  airports[which(airports['iata'] == destination), 'lat']
+  
+  distance <- tryCatch({
+    return(distm(c(origin_lon, origin_lat), c(destination_lon, destination_lat), fun = distGeo) / 1000 %>% round(., 2) )
+    }, error= function(e){
+      return(NULL)
+      })
+  
+  }
+}
+
+print(distance_airports("STO-CPH"))
+
+click_order_merge_filtered %>% 
+  mutate(click_itinerary_string = gsub(" ", "", str_trim(click_itinerary_string))) %>% .$click_itinerary_string %>% 
+  str_split(., ",") %>% 
+  sapply(., length) %>% max
+
+click_itinerary_string_cols <- click_order_merge_filtered %>% 
+  mutate(click_itinerary_string = gsub(" ", "", str_trim(click_itinerary_string))) %>% 
+  separate("click_itinerary_string", into = paste0("click_itinerary_string_", c(1:6)), sep = "," , remove = F) %>% 
+  select(contains("click_itinerary_string_")) 
+
+click_itinerary_string_cols %>% select(contains("click_itinerary_string_")) %>% unlist(use.names = F) %>% sapply(.,str_split, pattern = "-") %>% unlist(use.names = F) %>% unique %>% .[!. %in% airports$iata]
+
+click_itinerary_string_cols_dist <- sapply(colnames(click_itinerary_string_cols), function(col_name){
+  return(sapply(click_itinerary_string_cols[[col_name]], distance_airports))
+})
+colnames(click_itinerary_string_cols_dist) <- paste0(colnames(click_itinerary_string_cols_dist), "_dist")
+
+click_order_merge_filtered <- cbind(click_order_merge_filtered, click_itinerary_string_cols, click_itinerary_string_cols_dist)
+
+click_order_merge_filtered$click_itinerary_totaldistance <- rowSums(click_order_merge_filtered[grep('_dist$', names(click_order_merge_filtered))], na.rm = T)
+
 
 
 ```
