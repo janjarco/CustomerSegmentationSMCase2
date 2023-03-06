@@ -1,0 +1,54 @@
+---
+title: "DABN17_Case2_AOB_Travel_file_processing"
+output: html_document
+date: "2023-02-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# you may need to dowload the following package:
+#install.packages("tidyjson")
+library(tidyverse)
+library(tidyjson)
+
+# Define a function to load data from JSON files in the subdirectory
+load_data <- function(pattern) {
+  # Load data from all files in the directory that match the given pattern
+  lapply(list.files(recursive = T) %>% .[grepl(pattern, .)], function(file_name) {
+    # browser()
+    print(file_name)
+    # Read the file and convert it to a data frame from JSON format and select cols
+    readLines(file_name) %>% as.tbl_json %>% spread_all %>% 
+      as.data.frame %>% .[,-(1:4)]
+  }) %>% bind_rows(.) %>% 
+    rename_with(~sub("_source.", "", .x)) %>%
+    arrange(search_id) %>% #sort by search_id
+    distinct(search_id, .keep_all = T) # drop duplicated searches
+}
+
+# Load orders and clicks data from JSON files
+orders <- load_data("orders.split")
+clicks <- load_data("meta_clicks")
+
+colnames(orders) <- paste("order", colnames(orders), sep = "_")
+colnames(clicks) <- paste("click", colnames(clicks), sep = "_")
+
+# Merge the clicks and orders data frames based on the search_id column
+click_order_merge_raw <- left_join(clicks, orders, by = c("click_search_id" = "order_search_id"), suffixes = c("_clicks", "_orders")) %>% 
+  arrange(click_search_id)  # Order the merged data frame by the search_id column
+
+click_order_fulljoin_raw <- full_join(clicks, orders, by = c("click_search_id" = "order_search_id"), suffixes = c("_clicks", "_orders")) %>% 
+  arrange(click_search_id)  # Order the merged data frame by the search_id column
+
+# First few rows of merged data set
+print(click_order_merge %>% head(n = 20))
+
+# Checking colnames and comparing the content of merged tables
+sapply(click_order_merge$..JSON.y[[1]] , names)
+clicks %>% colnames()
+
+#if yuou want to save it 
+click_order_merge_raw %>% write_csv2("click_order_merged.csv")
+saveRDS(click_order_merge_raw, "click_order_merge.RDS")
+```

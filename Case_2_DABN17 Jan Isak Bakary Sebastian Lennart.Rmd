@@ -1,0 +1,370 @@
+---
+title: "Case2"
+author: "Sebastian Brugger"
+date: "2023-02-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(here)
+library(lubridate)
+library(plotly)
+library(tidyverse)
+# install.packages("factoextra")
+library(factoextra)
+# install.packages("NbClust")
+library(NbClust)
+```
+
+
+```{r include=FALSE}
+# to save time, we use the already unpacked and merged dataframe
+click_order_merge <- readRDS("click_order_merge.RDS")
+```
+
+```{r}
+# For now, and for this work, we are mostly interested in actual orders. We therefore will throw away all rows, where no one ordered.
+click_order_merge$order_if_order <- ifelse(click_order_merge$order_order_id %>% is.na,0, 1)
+
+# Excluding useless columsn
+click_order_merge <- click_order_merge %>% 
+  select(-c(
+    # click_columns
+    click_gate_id, click_meta_ref,click_searchrule_id, click_searchrule_version_id,
+    click_pricerule_flight_version_id, click_pricerule_hotel_version_id, click_pricerule_meta_version_id, click_pricerule_ancillary_version_id, click_presentationrule_version_id, 
+    # order_columns
+    order_midoffice_id, #order_midoffice_contact_id, order_midoffice_quotation_id, 
+    order_paid_unique_id, order_searchrule_action_id, order_logreader_type, order_searchrule_action_id, order_search_data.searchrule_id, order_search_data.gate_id, order_search_data.meta_rule_version_id, order_search_data.search_rule_version_id, 
+    order_search_data.flight_rule_version_id, order_search_data.hotel_rule_version_id, order_search_data.meta_rule_version_id, order_search_data.ancillary_rule_version_id, order_search_data.presentation_rule_version_id, order_search_data.text_rule_version_id,
+    contains("JSON"), # we no longer need this
+    contains(c("uuid", "click_serach_id")),
+    matches("leg_._(origin|destina)")
+    )
+  )
+
+```
+
+```{r}
+click_order_merge_filtered <- click_order_merge %>% filter(order_if_order == T) 
+# airports = read.csv("airports.csv") %>% select_at(-1)
+airports = read.csv( "https://raw.githubusercontent.com/ip2location/ip2location-iata-icao/master/iata-icao.csv") %>% 
+  select(iata, lat = latitude, lon = longitude) 
+
+#adding some missing airports
+airports <- airports %>% rbind(., c( "LON", airports[airports$iata == "LHR", 2:3] %>% unlist())) %>% 
+  rbind(., c( "PRN", 42.6629, 21.1655)) %>% 
+  rbind(., c("UBN", 47.6514, 106.8216))%>% 
+  mutate(lat = as.numeric(lat), lon = as.numeric(lon))
+
+airports %>% str
+
+
+# install.packages("geosphere")
+library(geosphere)
+
+str <- "CPH-WAW"
+
+distance_airports <- function(str){
+  # browser()
+  if (is.na(str)){return(NA)} else{
+  origin <- str_split(str, pattern = "-")[[1]][1]
+  destination <- str_split(str, pattern = "-")[[1]][2]
+  
+  origin_lon <-  airports[which(airports['iata'] == origin), 'lon']
+  origin_lat <-  airports[which(airports['iata'] == origin), 'lat']
+  
+  destination_lon <-  airports[which(airports['iata'] == destination), 'lon']
+  destination_lat <-  airports[which(airports['iata'] == destination), 'lat']
+  
+  distance <- tryCatch({
+    return(distm(c(origin_lon, origin_lat), c(destination_lon, destination_lat), fun = distGeo) / 1000 %>% round(., 2) )
+    }, error= function(e){
+      return(NULL)
+      })
+  
+  }
+}
+
+print(distance_airports("STO-CPH"))
+
+click_order_merge_filtered %>% 
+  mutate(click_itinerary_string = gsub(" ", "", str_trim(click_itinerary_string))) %>% .$click_itinerary_string %>% 
+  str_split(., ",") %>% 
+  sapply(., length) %>% max
+
+click_itinerary_string_cols <- click_order_merge_filtered %>% 
+  mutate(click_itinerary_string = gsub(" ", "", str_trim(click_itinerary_string))) %>% 
+  separate("click_itinerary_string", into = paste0("click_itinerary_string_", c(1:6)), sep = "," , remove = F) %>% 
+  select(contains("click_itinerary_string_")) 
+
+click_itinerary_string_cols %>% select(contains("click_itinerary_string_")) %>% unlist(use.names = F) %>% sapply(.,str_split, pattern = "-") %>% unlist(use.names = F) %>% unique %>% .[!. %in% airports$iata]
+
+click_itinerary_string_cols_dist <- sapply(colnames(click_itinerary_string_cols), function(col_name){
+  return(sapply(click_itinerary_string_cols[[col_name]], distance_airports))
+})
+colnames(click_itinerary_string_cols_dist) <- paste0(colnames(click_itinerary_string_cols_dist), "_dist")
+
+click_order_merge_filtered <- cbind(click_order_merge_filtered, click_itinerary_string_cols, click_itinerary_string_cols_dist)
+
+click_order_merge_filtered$click_itinerary_totaldistance <- rowSums(click_order_merge_filtered[grep('_dist$', names(click_order_merge_filtered))], na.rm = T)
+```
+
+
+```{r}
+# changing the price for the flight tickets to a common currency (SEK)
+Price_SEK <- click_order_merge_filtered %>%  
+  drop_na(click_itinerary_currency) %>% 
+  mutate(click_itinerary_sales_price_no_dkk = ifelse(click_itinerary_currency == "DKK", click_itinerary_sales_price/7*10, click_itinerary_sales_price)) %>% 
+  mutate(click_itinerary_sales_price_no_EUR = ifelse(click_itinerary_currency == "EUR", click_itinerary_sales_price_no_dkk*10, click_itinerary_sales_price_no_dkk)) %>% 
+  mutate(sales_price = ifelse(click_itinerary_currency == "NOK", click_itinerary_sales_price_no_EUR/10*11, click_itinerary_sales_price_no_EUR)) 
+
+
+
+# extracting some information about prices and travel time for plotting and kmeans
+Price_SEK_plot <- Price_SEK %>%
+  filter(click_itinerary_totaldistance < 20000) %>% 
+  filter(order_created_at > 0, click_itinerary_travel_time > 0, sales_price > 0) %>%
+  # Getting the travel time in hours
+  mutate(travel_time = round(click_itinerary_travel_time/60,2)) %>%
+  # this variable checks, whether we are looking at multiple stops flights or not not
+  mutate(multiple_direct = floor(nchar(click_itinerary_string)/7)) %>%
+  # if we know now, how many destinations we have, we can divide the next variables and get the average cost per fligt("direction")
+  mutate(price_per_flight = sales_price/multiple_direct) %>%
+  mutate(time_per_flight = travel_time/multiple_direct) %>%
+  # if we have indirect flights, the number of sections is greater than the variable multiple direct. this means, that we have more flights "per" direction and could calculate an average price or travel time per plane boarded.
+  mutate(price_per_segment = sales_price/click_itinerary_segment_count) %>%
+  filter(price_per_segment < 10000) %>% 
+  mutate(time_per_segment = travel_time/click_itinerary_segment_count) %>%
+  filter(time_per_segment < 13) %>%
+  # here we extract the hours and minutes of the order and transform them into a numerical variable to use in the kmeans clustering
+  mutate(hour_of_day = as.numeric(substr(order_created_at_date,12,13))) %>%
+  mutate(minute_of_day = as.numeric(as.numeric(substr(order_created_at_date,15,16))/60*100)) %>% 
+  mutate(hour_minutes =round(hour_of_day + minute_of_day/100, digits = 2)) %>% 
+  # replacing NAs for youth and children
+  mutate(order_search_data.search_parameters.youths = replace_na(order_search_data.search_parameters.youths, replace = 0), order_search_data.search_parameters.children = replace_na(order_search_data.search_parameters.children, replace = 0), 
+  order_search_data.search_parameters.infants = replace_na(order_search_data.search_parameters.infants, replace = 0) )
+  
+
+```
+
+
+
+```{r}
+# We check with this plot the price difference per hour and segment for indirect and direct flights.
+fligt_ordered <- Price_SEK_plot[sample(1:nrow(Price_SEK_plot),nrow(Price_SEK_plot)/5),] %>%
+  # filter(order_if_order == TRUE) %>%
+  filter(price_per_segment < 10000) %>%
+  filter(click_itinerary_segment_count < 7) %>%
+  # filter(multiple_direct < 3) %>%
+  filter(time_per_segment < 14) %>%
+ggplot(aes(x = time_per_segment, price_per_segment)) +
+   geom_jitter(aes(col = click_itinerary_direct_flight), alpha = 0.1) +
+  geom_smooth(aes(col = click_itinerary_direct_flight), method = "lm", formula = "y~x", se = FALSE) +
+  facet_wrap(~click_itinerary_segment_count)
+
+print(fligt_ordered)
+```
+
+
+```{r}
+# the same, but with price and distance per segment
+fligt_ordered_distance <- Price_SEK_plot[sample(1:nrow(Price_SEK_plot),nrow(Price_SEK_plot)/5),] %>%
+  # filter(order_if_order == TRUE) %>%
+  filter(price_per_segment < 10000) %>%
+  filter(click_itinerary_segment_count < 7) %>%
+  # filter(multiple_direct < 3) %>%
+  filter(time_per_segment < 14) %>%
+ggplot(aes(x = click_itinerary_totaldistance, price_per_segment)) +
+   geom_jitter(aes(col = click_itinerary_direct_flight), alpha = 0.1) +
+  geom_smooth(aes(col = click_itinerary_direct_flight), method = "lm", formula = "y~x", se = FALSE) +
+  facet_wrap(~click_itinerary_segment_count)
+
+print(fligt_ordered_distance)
+```
+
+
+
+```{r , cache=TRUE}
+# Using kmeans to identify certain customer segments.
+flight_kmeans <- Price_SEK_plot %>%
+  select(travel_time,
+         sales_price,
+         # click_itinerary_segment_count, # taking baggage out, because it doesn't have a strong effect on the clustering
+         click_itinerary_totaldistance
+         # ,
+         # click_itinerary_with_baggage # taking baggage out, because it skews the customer segmentation too strongly
+         ) 
+
+scaled_flight_kmeans<- as.data.frame(scale(flight_kmeans, center = FALSE))
+
+# Elbow method
+elbow <- fviz_nbclust(scaled_flight_kmeans, kmeans, method = "wss") +
+  geom_vline(xintercept = 5, linetype = 2) + # add line for better visualisation
+  labs(subtitle = "Elbow method") # add subtitle
+
+result <- kmeans(scaled_flight_kmeans, 5)
+scaled_flight_kmeans$cluster <- factor(result$cluster)
+
+p <- plot_ly(scaled_flight_kmeans, 
+             x=~click_itinerary_totaldistance, 
+             y=~travel_time, 
+             z=~sales_price,
+             color=~cluster) %>%
+     add_markers(size=1.5)
+print(p)
+```
+
+
+```{r}
+Price_SEK_plot_ordered <- Price_SEK_plot[,c(5,7,14:17,55:56,68:70,73, 91,94:100,103)] %>% 
+  mutate(cluster = result$cluster) %>% 
+  mutate(cluster_name = case_when(
+    cluster == 1 ~ "Long-distance money men", 
+    cluster == 2 ~ "Middle-distance family & friends",
+    cluster == 3 ~ "Short-distance and directly, homecoming students", 
+    cluster == 4 ~ "Short-to-middle distance, budget tourists", 
+    cluster == 5 ~ "Long-distance rationalists", 
+    TRUE ~ "MISSSING"
+  ))
+
+```
+
+
+```{r}
+## Here we could do some descriptive analysis with the customer segmented data
+summary(Price_SEK_plot_ordered %>% 
+  filter(cluster == 1))
+summary(Price_SEK_plot_ordered %>% 
+  filter(cluster == 2))
+
+
+cluster_dtp <- Price_SEK_plot_ordered %>% 
+  group_by(cluster, cluster_name) %>% 
+  summarise(avg_sales_price = mean(sales_price),
+            avg_no_adults = mean(order_search_data.search_parameters.adults),
+            avg_no_children = mean(order_search_data.search_parameters.children),
+            avg_no_infants = mean(order_search_data.search_parameters.infants),
+            avg_no_youths = mean(order_search_data.search_parameters.youths),
+            avg_order_price_pp = avg_sales_price/avg_no_adults,
+            avg_distance = mean(click_itinerary_totaldistance),
+            avg_travel_time = mean(travel_time),
+            avg_price_km = avg_sales_price/avg_no_adults/mean(click_itinerary_totaldistance),
+            avg_price_h = avg_sales_price/avg_no_adults/mean(travel_time),
+            quota_direct = mean(click_itinerary_direct_flight),
+            quota_mobile = mean(click_mobile),
+            quota_baggage = mean(click_itinerary_with_baggage),
+            avg_booking_time = mean(hour_minutes),
+            avg_segments = mean(click_itinerary_segment_count),
+            no_oneway = sum(order_search_data.search_parameters.type == "oneway"),
+            no_return = sum(order_search_data.search_parameters.type == "return"),
+            no_multi = sum(order_search_data.search_parameters.type == "multi"),
+            bookings = n(),
+            no_destination = n_distinct(click_itinerary_string)
+            ) %>% 
+  mutate(avg_no_children_total = avg_no_children + avg_no_youths + avg_no_infants, 
+         avg_sales_priceperperson = avg_sales_price / (avg_no_adults + avg_no_children + avg_no_infants + avg_no_youths)) %>% 
+  mutate(cluster_name = case_when(
+    cluster == 1 ~ "Long-distance money men", 
+    cluster == 2 ~ "Middle-distance families&friends",
+    cluster == 3 ~ "Short-distance and directly, homecoming students", 
+    cluster == 4 ~ "Short-to-middle distance, budget tourists", 
+    cluster == 5 ~ "Long-distance rationalists", 
+    TRUE ~ "MISSSING"
+  )) %>% relocate(cluster, cluster_name)
+
+### saving cluster_dtp
+
+write.xlsx(cluster_dtp, "cluster_descriptive statistics.xlsx")
+
+ggplotly(
+  ggplot(Price_SEK_plot_ordered) +
+    geom_density(aes(x = click_itinerary_totaldistance, col = as.factor(cluster)))
+)
+
+theme_set(theme_bw())
+
+scatter_cluster <- ggplotly(
+  ggplot(Price_SEK_plot_ordered[sample(nrow(Price_SEK_plot_ordered), nrow(Price_SEK_plot_ordered)/5),]) +
+    geom_jitter(aes(x = click_itinerary_totaldistance, y = sales_price, col = as.factor(cluster_name)), alpha = 0.4) + 
+    xlab("Travel distance, kilometers") + 
+    ylab("Total sales price, SEK") + 
+    labs(colour="Cluster") + 
+    ylim(0, 55000) + 
+    theme(legend.position = c(0.7, .25)), width = 1200, height = 800
+); scatter_cluster
+
+htmlwidgets::saveWidget(as_widget(scatter_cluster), "scatter_cluster.html")
+
+ggplotly(
+  ggplot(Price_SEK_plot_ordered) +
+    geom_density(aes(x = sales_price, col = as.factor(cluster)))
+)
+
+ggplotly(
+ggplot(cluster_dtp) +
+  geom_col(aes(x = as.factor(avg_travel_time), y = avg_sales_price, fill = as.factor(cluster), alpha = 0.3)) 
+  
+)
+```
+
+
+```{r Cluster_of_clusters} 
+# If subcluster 4, then we have to change from 7 optimal clusters according to the elbow method to 3.
+subcluster <- 4
+optimal_cluster <- ifelse(subcluster == 4, 3, 7)
+
+flight_kmeans_second <- Price_SEK_plot_ordered %>%
+  filter(cluster == subcluster) %>% 
+  select(click_mobile,
+         click_itinerary_segment_count,
+         click_itinerary_with_baggage,
+         order_search_data.search_parameters.adults,
+         ) 
+
+scaled_flight_kmeans_second <- as.data.frame(scale(flight_kmeans_second, center = FALSE))
+
+elbow_second <- fviz_nbclust(scaled_flight_kmeans_second, kmeans, method = "wss") +
+  geom_vline(xintercept = optimal_cluster, linetype = 2) + # add line for better visualisation
+  labs(subtitle = "Elbow method") # add subtitle
+elbow_second
+
+result_second <- kmeans(scaled_flight_kmeans_second, optimal_cluster)
+scaled_flight_kmeans_second$cluster <- factor(result_second$cluster)
+
+Price_SEK_plot_ordered_second <- Price_SEK_plot_ordered %>%
+  filter(cluster == subcluster) %>% 
+  mutate(cluster_second = result_second$cluster)
+
+p_second <- plot_ly(Price_SEK_plot_ordered_second, 
+             x=~click_itinerary_totaldistance, 
+             y=~travel_time, 
+             z=~sales_price,
+             color=~as.factor(cluster_second),
+             colors = "Set2") %>%
+     add_markers(size=1.5)
+print(p_second)
+
+cluster_dtp_2 <- Price_SEK_plot_ordered_second %>% 
+  group_by(cluster_second) %>% 
+  summarise(avg_sales_price = mean(sales_price),
+            avg_no_adults = mean(order_search_data.search_parameters.adults),
+            avg_order_price_pp = avg_sales_price/avg_no_adults,
+            avg_distance = mean(click_itinerary_totaldistance),
+            avg_travel_time = mean(travel_time),
+            avg_price_km = avg_sales_price/avg_no_adults/mean(click_itinerary_totaldistance),
+            avg_price_h = avg_sales_price/avg_no_adults/mean(travel_time),
+            quota_direct = mean(click_itinerary_direct_flight),
+            quota_mobile = mean(click_mobile),
+            quota_baggage = mean(click_itinerary_with_baggage),
+            avg_booking_time = mean(hour_minutes),
+            avg_segments = mean(click_itinerary_segment_count),
+            no_oneway = sum(order_search_data.search_parameters.type == "oneway"),
+            no_return = sum(order_search_data.search_parameters.type == "return"),
+            no_multi = sum(order_search_data.search_parameters.type == "multi"),
+            bookings = n()
+            )
+```
