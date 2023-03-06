@@ -1,2 +1,2 @@
 # SMCase2
-Case 2 AOB Travel for Analytics-based Startegic Management 
+Customer segemntation - Case 2 for Analytics-based Startegic Management 
