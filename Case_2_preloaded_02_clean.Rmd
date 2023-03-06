@@ -1,6 +1,6 @@
 ---
 title: "Case2"
-author: "Sebastian Brugger"
+author: "Jan Jarco and Sebastian Brugger"
 date: "2023-02-14"
 output: html_document
 ---
